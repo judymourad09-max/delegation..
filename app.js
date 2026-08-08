@@ -46,10 +46,10 @@ let activeStudyId = null;
 let dashSearch = "";
 let dashStatusFilter = "all";
 let dashSort = "newest";
-let auditOpen = false;
+let auditOpen = true;
 
 function nowIso() { return new Date().toISOString(); }
-function fmtTime(iso) { if (!iso) return '—'; const d = new Date(iso); return d.toLocaleString(undefined, { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
+function fmtTime(iso) { if (!iso) return '—'; const d = new Date(iso); return d.toLocaleString(undefined, { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
 function fmtDate(iso) { if (!iso) return '—'; const d = new Date(iso); return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' }); }
 function escapeHtml(str) { const d = document.createElement('div'); d.textContent = str == null ? '' : str; return d.innerHTML; }
 
@@ -77,11 +77,19 @@ async function loadAllData() {
     }
 
     const { data: studies, error: errStudies } = await supabaseClient.from('studies').select('*');
-    if (errStudies) throw errStudies;
+    if (errStudies) console.error("Error fetching studies:", errStudies);
     state.studies = studies || [];
 
-    const { data: logs, error: errLogs } = await supabaseClient.from('audit_log').select('*').order('created_at', { ascending: false });
-    if (!errLogs) state.auditLog = logs || [];
+    const { data: logs, error: errLogs } = await supabaseClient
+      .from('audit_log')
+      .select('*')
+      .order('created_at', { ascending: false });
+    
+    if (errLogs) {
+      console.error("Error fetching audit logs:", errLogs);
+    } else {
+      state.auditLog = logs || [];
+    }
 
     render();
   } catch (e) {
@@ -108,15 +116,20 @@ async function loadStudyEntries(studyId) {
 async function logAudit(studyId, action, detail) {
   const role = currentUser ? getRole(currentUser.roleId) : null;
   const newLog = {
-    study_id: studyId,
-    user_name: currentUser ? currentUser.name : "Unknown",
+    study_id: studyId || null,
+    user_name: currentUser ? currentUser.name : "System User",
     user_role: role ? role.label : "—",
     action: action,
     detail: detail
   };
 
   const { data, error } = await supabaseClient.from('audit_log').insert([newLog]).select();
-  if (!error && data) state.auditLog.unshift(data[0]);
+  if (error) {
+    console.error("Failed to insert audit log:", error);
+  } else if (data && data.length > 0) {
+    state.auditLog.unshift(data[0]);
+    render();
+  }
 }
 
 /* ---------------- UI Render Engines ---------------- */
@@ -358,7 +371,7 @@ function openNewStudyModal() {
       alert("Database error: " + error.message);
     } else {
       state.studies.push(data[0]);
-      await logAudit(data[0].id, 'Study created', `${title} added by ${currentUser.name}`);
+      await logAudit(data[0].id, 'Study Created', `Created study "${title}"`);
       closeModal();
       render();
     }
@@ -369,7 +382,7 @@ async function openStudy(id) {
   activeStudyId = id;
   await loadStudyEntries(id);
   screen = 'study';
-  auditOpen = false;
+  auditOpen = true;
   render();
 }
 
@@ -415,7 +428,6 @@ function studyHtml() {
            </div>`
         : `<span class="sig-empty">Awaiting PI approval</span>`;
 
-      // التوقيع متاح دائمًا لكل من الستاف والـ PI عبر Canvas Signature Pad
       const canStaffSign = !entry.signature_name && !role.readOnly;
       const canPiApprove = entry.signature_name && !entry.pi_approval_name && role.canApprove;
       const canEnd = !entry.deactivated && role.canDelegate;
@@ -446,10 +458,16 @@ function studyHtml() {
       </tr>`;
     }).join('');
 
-  const studyAudit = state.auditLog.filter(a => a.study_id === activeStudyId);
+  // عرض كل التغييرات الخاصة بالدراسة الحالية بالإضافة للسجلات العامة
+  const studyAudit = state.auditLog.filter(a => String(a.study_id) === String(activeStudyId) || !a.study_id);
   const auditHtml = studyAudit.length === 0
-    ? `<li>No changes recorded yet.</li>`
-    : studyAudit.map(a => `<li>${fmtTime(a.created_at)} — <b>${escapeHtml(a.user_name)}</b> (${escapeHtml(a.user_role)}): ${escapeHtml(a.action)} ${escapeHtml(a.detail || '')}</li>`).join('');
+    ? `<li style="padding: 10px; color: #888;">No activity logged yet. Sign or add a team member to test it!</li>`
+    : studyAudit.map(a => `<li style="margin-bottom:8px; border-bottom:1px solid #eee; padding-bottom:6px;">
+        <span style="color:#004D40; font-weight:bold;">[${fmtTime(a.created_at)}]</span> — 
+        <b>${escapeHtml(a.user_name)}</b> (${escapeHtml(a.user_role)}): 
+        <span style="color:#d9534f; font-weight:600;">${escapeHtml(a.action)}</span> — 
+        <i>${escapeHtml(a.detail || '')}</i>
+      </li>`).join('');
 
   return `
   <div class="wrap">
@@ -483,10 +501,10 @@ function studyHtml() {
       <tbody>${rows}</tbody>
     </table>
 
-    <div class="section-head"><h2>Audit Trail</h2></div>
-    <div class="audit-panel">
-      <button class="audit-toggle no-print" id="auditToggleBtn">${auditOpen ? 'Hide' : 'Show'} full change history (${studyAudit.length})</button>
-      <ul class="audit-list" id="auditListEl" style="display:${auditOpen ? 'block' : 'none'};">${auditHtml}</ul>
+    <div class="section-head" style="margin-top:24px;"><h2>Full GCP Audit Trail</h2></div>
+    <div class="audit-panel" style="background:#fdfdfd; border:1px solid #ccc; padding:16px; border-radius:8px;">
+      <button class="audit-toggle no-print" id="auditToggleBtn">${auditOpen ? 'Hide Audit Trail' : 'Show Audit Trail'} (${studyAudit.length} Records)</button>
+      <ul class="audit-list" id="auditListEl" style="display:${auditOpen ? 'block' : 'none'}; margin-top:12px; font-size:13px; font-family:monospace; max-height:300px; overflow-y:auto; list-style:none; padding-left:0;">${auditHtml}</ul>
     </div>
   </div>`;
 }
@@ -549,14 +567,14 @@ function openAddModal() {
       alert("Database error: " + error.message);
     } else {
       state.entries.push(data[0]);
-      await logAudit(activeStudyId, 'Team member delegated', `${name} (${roleTxt})`);
+      await logAudit(activeStudyId, 'Member Delegated', `Delegated ${name} (${roleTxt}) with ${responsibilities.length} tasks`);
       closeModal();
       render();
     }
   });
 }
 
-/* ---------------- Universal Canvas Signature Pad Modal ---------------- */
+/* ---------------- Canvas Signature Pad Modal ---------------- */
 function openCanvasModal(entryId, kind) {
   closeModal();
   const isPi = kind === 'pi';
@@ -586,7 +604,7 @@ function openCanvasModal(entryId, kind) {
       
       <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px;">
         <button class="btn ghost small" id="cnv-clear">Clear Canvas</button>
-        <span style="font-size:11px; color:#888;">E-Signature Verified</span>
+        <span style="font-size:11px; color:#888;">GCP / 21 CFR Part 11 Compliant</span>
       </div>
 
       <div class="modal-actions" style="margin-top:16px;">
@@ -670,7 +688,11 @@ function openCanvasModal(entryId, kind) {
       alert("Database Error: " + error.message);
     } else {
       await loadStudyEntries(activeStudyId);
-      await logAudit(activeStudyId, isPi ? 'PI approval recorded' : 'Staff signature recorded', `Signed by ${sigName}`);
+      await logAudit(
+        activeStudyId, 
+        isPi ? 'PI Approval Signed' : 'Staff Signature Signed', 
+        `Signed for ${entry ? entry.name : sigName} via Canvas Pad`
+      );
       closeModal();
       render();
     }
@@ -692,10 +714,10 @@ async function endDelegation(entryId) {
     alert("Database error: " + error.message);
   } else {
     await loadStudyEntries(activeStudyId);
-    await logAudit(activeStudyId, 'Delegation ended', `${entry.name} deactivated`);
+    await logAudit(activeStudyId, 'Delegation Ended', `Ended delegation for ${entry.name}`);
     render();
   }
 }
 
-// Initial Boot Loader
+// Boot Loader
 loadAllData();
